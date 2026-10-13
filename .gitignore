@@ -1,0 +1,15 @@
+# Local data
+*.db
+
+# Wi-Fi credentials (copy secrets.example.h to secrets.h)
+esp32_ds18b20_test/src/secrets.h
+
+# Build output
+.pio/
+__pycache__/
+
+# macOS
+.DS_Store
+
+# Accidental duplicate of mead_parts_and_assembly.md
+Scroll Reverser.app

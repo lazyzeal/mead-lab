@@ -89,10 +89,16 @@ button:disabled{opacity:.45;cursor:default}.actions{display:flex;gap:12px;flex-w
 <button type="button" id="reverse" class="secondary">反算补足原料用量</button></div>
 <div id="abv" class="abv"></div>
 <h3>配方 / 工艺</h3><textarea id="fRecipe" rows="6" placeholder="原料细节、营养盐、添加物、步骤……"></textarea>
-<h3>备注</h3><textarea id="fNotes" rows="4"></textarea>
+<h3>备注</h3><textarea id="fNotes" rows="4" placeholder="随时记录观察和问题，开始酿造后也可以修改"></textarea>
+<div id="gravityBox"><h3>比重记录</h3><div class="settings">
+<label>测量时间<input id="gTime" type="datetime-local"></label>
+<label>比重<input id="gValue" type="number" step="0.001" placeholder="1.050"></label>
+<label style="flex:1">备注<input id="gNote" placeholder="可选"></label>
+<button type="button" id="addGravity" class="secondary">添加读数</button></div>
+<table class="ferm"><thead><tr><th>时间</th><th>比重</th><th>当前酒精度</th><th>备注</th><th></th></tr></thead><tbody id="gravityRows"></tbody></table></div>
 <div class="actions"><button type="button" id="saveDraft">保存草稿</button>
 <button type="button" id="startBrew" class="success">开始酿造</button>
-<button type="button" id="saveFg">保存实测 FG</button>
+<button type="button" id="saveFg">保存实测 FG 和备注</button>
 <button type="button" id="endBrew" class="danger">结束酿造</button>
 <button type="button" id="deleteDraft" class="ghost">删除草稿</button><span id="brewMessage"></span></div>
 </form>
@@ -108,17 +114,25 @@ button:disabled{opacity:.45;cursor:default}.actions{display:flex;gap:12px;flex-w
 const $=s=>document.querySelector(s),chart=echarts.init($("#chart"));let points=[],editing=false;
 ["#target","#startInput","#stopInput"].forEach(selector=>$(selector).addEventListener("input",()=>editing=true));
 const GAP_MS=35000;
-function draw(raw){let d=[];raw.forEach((p,i)=>{if(i&&new Date(p.time)-new Date(raw[i-1].time)>GAP_MS)d.push({time:p.time,gap:true});d.push(p)});
+function draw(raw,grav=[],brew=null){let d=[];raw.forEach((p,i)=>{if(i&&new Date(p.time)-new Date(raw[i-1].time)>GAP_MS)d.push({time:p.time,gap:true});d.push(p)});
+// Gravity: measured OG at the brew start, then the manual readings.
+let gp=grav.map(g=>[g.time,g.gravity,g.note]);if(brew&&brew.og&&brew.started_at)gp.unshift([brew.started_at,brew.og,"OG"]);
 points=d;let values=raw.flatMap(p=>[p.temperature,p.target,p.start,p.stop]).filter(Number.isFinite);
-if(!values.length){chart.setOption({graphic:{type:"text",left:"center",top:"middle",style:{text:"暂无温度记录",fill:"#8a97ab",fontSize:16}}},{notMerge:true});return}
-let lo=Math.floor(Math.min(...values)-1),hi=Math.ceil(Math.max(...values)+1);
+if(!values.length&&!gp.length){chart.setOption({graphic:{type:"text",left:"center",top:"middle",style:{text:"暂无温度记录",fill:"#8a97ab",fontSize:16}}},{notMerge:true});return}
+let lo=values.length?Math.floor(Math.min(...values)-1):15,hi=values.length?Math.ceil(Math.max(...values)+1):25;
 if(hi-lo<4){let center=(lo+hi)/2;lo=Math.floor(center-2);hi=Math.ceil(center+2)}
 let line=(name,key,color)=>({name,type:"line",data:d.map(p=>[p.time,p.gap?null:p[key]]),step:"end",symbol:"none",lineStyle:{color,type:"dashed",width:2},tooltip:{show:false}});
-chart.setOption({animation:false,color:["#3978df","#e6a817","#df6b5d","#36a269"],grid:{left:58,right:24,top:25,bottom:58},legend:{top:0,right:0},
-tooltip:{trigger:"axis",axisPointer:{type:"cross"},backgroundColor:"#172033",borderWidth:0,textStyle:{color:"#fff"},formatter:function(items){let p=d[items[0].dataIndex];if(!p||p.gap)return"";let date=new Date(p.time);return date.toLocaleString()+"<br><b>实际温度："+p.temperature.toFixed(2)+"℃</b><br>目标："+p.target.toFixed(2)+"℃ · 启动："+p.start.toFixed(2)+"℃ · 停止："+p.stop.toFixed(2)+"℃<br>"+(p.cooler_on?"制冷中":"制冷停止")}},
+let yAxis=[{type:"value",name:"温度（℃）",min:lo,max:hi,interval:1,axisLabel:{color:"#718096",formatter:"{value}℃"},splitLine:{lineStyle:{color:"#edf1f6"}}}],
+series=[{name:"实际温度",type:"line",data:d.map(p=>[p.time,p.gap?null:p.temperature]),smooth:true,symbol:"none",lineStyle:{width:3},areaStyle:{color:"#3978df12"}},line("目标温度","target","#e6a817"),line("启动温度","start","#df6b5d"),line("停止温度","stop","#36a269")];
+if(gp.length){yAxis.push({type:"value",name:"比重",position:"right",scale:true,splitLine:{show:false},axisLabel:{color:"#8e5bd8",formatter:v=>v.toFixed(3)}});
+series.push({name:"比重",type:"line",yAxisIndex:1,data:gp,symbol:"circle",symbolSize:8,lineStyle:{width:2,color:"#8e5bd8"},itemStyle:{color:"#8e5bd8"}})}
+const fmtTip=items=>{let t=items.find(i=>i.seriesName==="实际温度"),g=items.find(i=>i.seriesName==="比重"),out=[];
+let p=t&&d[t.dataIndex];if(p&&!p.gap)out.push(new Date(p.time).toLocaleString(),"<b>实际温度："+p.temperature.toFixed(2)+"℃</b>","目标："+p.target.toFixed(2)+"℃ · 启动："+p.start.toFixed(2)+"℃ · 停止："+p.stop.toFixed(2)+"℃",p.cooler_on?"制冷中":"制冷停止");
+if(g){let [gt,gv,note]=gp[g.dataIndex];if(!p||Math.abs(new Date(gt)-new Date(p.time))<1800000)out.push("<b>比重："+gv.toFixed(3)+"</b>（"+new Date(gt).toLocaleString()+(note?" · "+esc(note):"")+"）")}return out.join("<br>")};
+chart.setOption({animation:false,color:["#3978df","#e6a817","#df6b5d","#36a269","#8e5bd8"],grid:{left:58,right:gp.length?64:24,top:44,bottom:58},legend:{top:0,left:"center"},
+tooltip:{trigger:"axis",axisPointer:{type:"cross"},backgroundColor:"#172033",borderWidth:0,textStyle:{color:"#fff"},formatter:fmtTip},
 xAxis:{type:"time",name:"时间",nameLocation:"middle",nameGap:36,axisLabel:{color:"#718096"},axisLine:{lineStyle:{color:"#cbd5e1"}},splitLine:{show:false}},
-yAxis:{type:"value",name:"温度（℃）",min:lo,max:hi,interval:1,axisLabel:{color:"#718096",formatter:"{value}℃"},splitLine:{lineStyle:{color:"#edf1f6"}}},
-series:[{name:"实际温度",type:"line",data:d.map(p=>[p.time,p.gap?null:p.temperature]),smooth:true,symbol:"none",lineStyle:{width:3},areaStyle:{color:"#3978df12"}},line("目标温度","target","#e6a817"),line("启动温度","start","#df6b5d"),line("停止温度","stop","#36a269")]},{notMerge:true});}
+yAxis,series},{notMerge:true});}
 const STATUS={draft:"草稿",active:"进行中",ended:"已结束"},SUGAR_DEFAULT={honey:80,sugar:100,juice:12,fruit:10,other:50},
 CATEGORY={honey:"蜂蜜",sugar:"糖",juice:"果汁",fruit:"水果",other:"其他"},SUCROSE_POINTS=384;let brews=[];
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -135,7 +149,7 @@ show("#stats",v==="overview");show("#chartCard",v==="overview"||(v==="brew"&&rec
 show("#rangeWrap",v==="overview"||(v==="brew"&&b&&b.status==="active"));
 $("#viewTitle").textContent={overview:"温度监控",settings:"温控设置",new:"新建酿造"}[v]||(b?b.title:"");
 $("#viewSub").innerHTML=v==="brew"&&b?`<span class="badge ${b.status}">${STATUS[b.status]}</span>#${b.id}${b.brew_date?" · 开始日期 "+b.brew_date:""}${b.status==="ended"?" · 温度曲线为开始到结束":""}`:v==="new"?"填写配方并保存为草稿，开始酿造前不会启动制冷":"";
-if(v==="brew"||v==="new")fillForm(b);renderNav();chart.resize();update()}
+if(v==="brew"||v==="new")fillForm(b);if(v==="brew"&&b&&b.status!=="draft")loadGravity(b.id);renderNav();chart.resize();update()}
 function fermRow(f={}){let tr=document.createElement("tr"),cat=f.category||"honey";
 tr.innerHTML=`<td><input class="fn" value="${esc(f.name)}" placeholder="椴树蜜"></td><td><select class="fc">${Object.entries(CATEGORY).map(([k,v])=>`<option value="${k}"${k===cat?" selected":""}>${v}</option>`).join("")}</select></td>
 <td><input class="fa" type="number" step="0.01" min="0" value="${f.amount??""}"></td><td><select class="fu"><option value="kg">kg</option><option value="L">L</option></select></td>
@@ -156,6 +170,8 @@ let fresh=status==="new";set("#fTempTarget",fresh?18:v.temp_target);set("#fTempS
 $("#fermRows").innerHTML="";(v.fermentables&&v.fermentables.length?v.fermentables:[{}]).forEach(fermRow);
 document.querySelectorAll("#brewForm input,#brewForm select,#brewForm textarea,#addFerm,#estimate,#reverse,.fd").forEach(el=>el.disabled=!editable);
 $("#fFgMeas").disabled=editable;let show=(id,on)=>$(id).style.display=on?"":"none";
+$("#fNotes").disabled=false;["#gTime","#gValue","#gNote","#addGravity"].forEach(id=>$(id).disabled=editable);show("#gravityBox",!editable);
+$("#gTime").value=localNow();$("#gValue").value="";$("#gNote").value="";
 show("#saveDraft",editable);show("#startBrew",editable);show("#deleteDraft",status==="draft");show("#saveFg",!editable);show("#endBrew",status==="active");
 $("#estimateResult").textContent="";msg("",true);showAbv()}
 function estimatedOg(d){let fs=d.fermentables.filter(f=>f.amount>0&&f.sugar_pct>0);if(!(d.volume_l>0)||!fs.length)return null;
@@ -166,14 +182,22 @@ async function update(){try{let s=await(await fetch("/api/status")).json();if(s.
 let brew=s.active_brew;if(view==="overview")$("#viewSub").textContent=brew?`进行中：#${brew.id} ${brew.title}${brew.volume_l?"（"+brew.volume_l+" L）":""}`:"没有进行中的酿造，开始酿造后才会记录温度";
 let sel=selectedBrew(),id=view==="overview"?(brew&&brew.id):view==="brew"&&sel&&sel.status!=="draft"?sel.id:null;
 if(view!=="overview"&&!id)return;if(!id){draw([]);return}let q="&brew_id="+id;
-let h=await(await fetch("/api/history?hours="+$("#range").value+q)).json();draw(h)}catch(e){$("#status").textContent="服务连接失败："+e.message}}
+let h=await(await fetch("/api/history?hours="+$("#range").value+q)).json(),g=await(await fetch("/api/brews/"+id+"/gravity")).json();
+draw(h,g,brews.find(x=>x.id===id))}catch(e){$("#status").textContent="服务连接失败："+e.message}}
+const localNow=()=>{let d=new Date();d.setMinutes(d.getMinutes()-d.getTimezoneOffset());return d.toISOString().slice(0,16)};
+async function loadGravity(id){let rows=id?await(await fetch("/api/brews/"+id+"/gravity")).json():[],b=selectedBrew(),og=b&&b.og;
+$("#gravityRows").innerHTML=rows.map(g=>`<tr><td>${new Date(g.time).toLocaleString()}</td><td>${g.gravity.toFixed(3)}</td><td>${og?Math.max(0,(og-g.gravity)*131.25).toFixed(1)+"%":"-"}</td><td>${esc(g.note)}</td><td><button type="button" class="ghost" data-gid="${g.id}">删除</button></td></tr>`).join("")||'<tr><td colspan="5" class="muted">暂无比重记录</td></tr>';
+$("#gravityRows").querySelectorAll("[data-gid]").forEach(btn=>btn.onclick=async()=>{if(!confirm("删除这条比重记录？"))return;await post("/api/brews/"+id+"/gravity-delete",{id:+btn.dataset.gid});await loadGravity(id);update()})}
+$("#addGravity").onclick=async()=>{let b=selectedBrew();if(!b)return;let v=num($("#gValue").value);if(!(v>0)){msg("请填写比重",false);return}
+let r=await post("/api/brews/"+b.id+"/gravity",{gravity:v,measured_at:$("#gTime").value?new Date($("#gTime").value).toISOString():null,note:$("#gNote").value});
+if(!r.ok){msg("添加失败："+r.error,false);return}$("#gValue").value="";$("#gNote").value="";msg("比重已记录",true);await loadGravity(b.id);update()};
 async function post(url,body){let r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});return r.json()}
 async function saveDraft(){let d=readForm();if(!d.title){msg("请填写标题",false);return null}let b=selectedBrew(),r=await post(b?"/api/brews/"+b.id:"/api/brews",d);
 if(!r.ok){msg("保存失败："+r.error,false);return null}await refreshBrews(r.id);msg("草稿已保存",true);return r.id}
 $("#saveDraft").onclick=saveDraft;
 $("#startBrew").onclick=async()=>{if(!confirm("开始酿造后 ESP32 将启用自动制冷并开始记录温度，配方和 OG 将不能再修改。确认开始？"))return;
 let id=await saveDraft();if(!id)return;let r=await post("/api/brews/"+id+"/start");if(!r.ok){msg("开始失败："+r.error,false);return}await refreshBrews(id);msg("已开始酿造",true);update()};
-$("#saveFg").onclick=async()=>{let b=selectedBrew();if(!b)return;let r=await post("/api/brews/"+b.id,{fg_measured:num($("#fFgMeas").value)});
+$("#saveFg").onclick=async()=>{let b=selectedBrew();if(!b)return;let r=await post("/api/brews/"+b.id,{fg_measured:num($("#fFgMeas").value),notes:$("#fNotes").value});
 if(!r.ok){msg("保存失败："+r.error,false);return}await refreshBrews(b.id);msg("实测 FG 已保存",true)};
 $("#endBrew").onclick=async()=>{let b=selectedBrew();if(!b||!confirm("确认结束酿造？将关闭制冷并停止记录温度。"))return;let r=await post("/api/brews/"+b.id+"/end");
 if(!r.ok){msg("结束失败："+r.error,false);return}await refreshBrews(b.id);msg("酿造已结束",true);update()};
@@ -215,6 +239,13 @@ def db():
     connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS temperature_device_sample
         ON temperature(device_boot, device_seq)""")
     connection.execute("CREATE TABLE IF NOT EXISTS device_state (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")
+    # Backfilled readings arrive out of order, so history is always read in time order.
+    connection.execute("CREATE INDEX IF NOT EXISTS temperature_brew_time ON temperature(brew_id, received_at)")
+    connection.execute("""CREATE TABLE IF NOT EXISTS gravity_readings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        brew_id INTEGER NOT NULL REFERENCES brews(id) ON DELETE CASCADE,
+        measured_at TEXT NOT NULL, gravity REAL NOT NULL, note TEXT
+    )""")
     brew_columns = {row[1] for row in connection.execute("PRAGMA table_info(brews)")}
     legacy = "batch" in brew_columns
     if legacy:
@@ -510,6 +541,13 @@ class Handler(BaseHTTPRequestHandler):
                 brews = load_brews(connection)
             self.send_json(brews)
             return
+        parts = path.strip("/").split("/")
+        if len(parts) == 4 and parts[:2] == ["api", "brews"] and parts[3] == "gravity" and parts[2].isdigit():
+            with DB_LOCK, db() as connection:
+                rows = connection.execute("""SELECT id,measured_at,gravity,note FROM gravity_readings
+                    WHERE brew_id=? ORDER BY measured_at""", (int(parts[2]),)).fetchall()
+            self.send_json([dict(zip(("id", "time", "gravity", "note"), row)) for row in rows])
+            return
         if path == "/api/history":
             hours = 24
             query = parse_qs(parsed.query)
@@ -537,7 +575,7 @@ class Handler(BaseHTTPRequestHandler):
                     (SELECT h.start FROM config_history h WHERE h.changed_at<=t.received_at ORDER BY h.id DESC LIMIT 1),
                     (SELECT h.stop FROM config_history h WHERE h.changed_at<=t.received_at ORDER BY h.id DESC LIMIT 1)
                     FROM temperature t WHERE t.received_at>=? AND t.received_at<=? AND (? IS NULL OR t.brew_id=?)
-                    ORDER BY t.id""",
+                    ORDER BY t.received_at""",
                     (since, until, brew_id, brew_id),
                 ).fetchall()
             self.send_json([{"time": row[0], "temperature": row[1], "cooler_on": bool(row[2]),
@@ -647,16 +685,42 @@ class Handler(BaseHTTPRequestHandler):
                     save_fermentables(connection, brew_id, fermentables)
                     connection.commit()
             else:
-                # After the brew starts only the measured FG remains editable.
+                # After the brew starts only the measured FG and the notes remain editable.
                 try:
                     fg_measured = optional_number(body.get("fg_measured"), "fg_measured")
                 except ValueError as error:
                     self.send_json({"error": str(error)}, 400)
                     return
                 with DB_LOCK, db() as connection:
-                    connection.execute("UPDATE brews SET fg_measured=? WHERE id=?", (fg_measured, brew_id))
+                    connection.execute("UPDATE brews SET fg_measured=?,notes=? WHERE id=?",
+                                       (fg_measured, str(body.get("notes") or ""), brew_id))
                     connection.commit()
             self.send_json({"ok": True, "id": brew_id})
+        elif action == "gravity":
+            if status == "draft":
+                self.send_json({"error": "开始酿造后才能记录比重"}, 409)
+                return
+            try:
+                gravity = optional_number(body.get("gravity"), "gravity")
+                if gravity is None or not 0.98 <= gravity <= 1.2:
+                    raise ValueError("比重需在 0.980～1.200 之间")
+                measured_at = body.get("measured_at")
+                measured_at = (datetime.fromisoformat(measured_at.replace("Z", "+00:00")).astimezone(timezone.utc)
+                               if measured_at else datetime.now(timezone.utc)).isoformat(timespec="microseconds")
+            except (ValueError, AttributeError) as error:
+                self.send_json({"error": str(error)}, 400)
+                return
+            with DB_LOCK, db() as connection:
+                cursor = connection.execute("INSERT INTO gravity_readings(brew_id,measured_at,gravity,note) VALUES(?,?,?,?)",
+                                            (brew_id, measured_at, gravity, str(body.get("note") or "").strip()))
+                connection.commit()
+            self.send_json({"ok": True, "id": cursor.lastrowid})
+        elif action == "gravity-delete":
+            with DB_LOCK, db() as connection:
+                connection.execute("DELETE FROM gravity_readings WHERE id=? AND brew_id=?",
+                                   (body.get("id"), brew_id))
+                connection.commit()
+            self.send_json({"ok": True})
         elif action == "start":
             if status != "draft":
                 self.send_json({"error": "只有草稿可以开始酿造"}, 409)

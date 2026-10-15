@@ -41,7 +41,7 @@ label{display:block;color:#526174;margin:8px 0 4px}input,select,button{font:inhe
 button{background:#3978df;color:#fff;border:0;cursor:pointer;font-weight:600}.settings{display:flex;gap:18px;flex-wrap:wrap;align-items:end}.settings label{min-width:140px}
 .chart-head{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}.chart-wrap{height:480px;margin-top:12px}.ok{color:#218653}.error{color:#d14343}
 h3{font-size:15px;margin:22px 0 4px;color:#33415c}textarea{width:100%;font:inherit;border-radius:8px;border:1px solid #d3dce9;padding:10px;resize:vertical}
-label.inline{display:flex;align-items:center;gap:8px;margin:0}input:disabled,select:disabled,textarea:disabled{background:#f4f7fb;color:#526174}
+label.inline{display:flex;align-items:center;gap:8px;margin:0}.range{display:flex;align-items:center;gap:8px;flex-wrap:wrap}input:disabled,select:disabled,textarea:disabled{background:#f4f7fb;color:#526174}
 table.ferm{width:100%;border-collapse:collapse;margin:6px 0 10px}table.ferm th{text-align:left;font-weight:500;color:#718096;padding:4px 6px}table.ferm td{padding:4px 6px}table.ferm input,table.ferm select{width:100%}
 button.secondary{background:#e8f0fd;color:#2d63c4}button.success{background:#218653}button.danger{background:#d14343}button.ghost{background:transparent;color:#d14343;border:1px solid #f0caca}
 button:disabled{opacity:.45;cursor:default}.actions{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:20px 0 8px}.abv{margin-top:10px;font-weight:600}
@@ -53,9 +53,10 @@ button:disabled{opacity:.45;cursor:default}.actions{display:flex;gap:12px;flex-w
 <button id="newBrew" class="new">＋ 新建酿造</button><div id="brewNav"></div></nav>
 <div id="status" class="side-status">正在连接电脑服务…</div></aside>
 <main><header class="top"><div><h1 id="viewTitle">温度监控</h1><div id="viewSub" class="muted"></div></div>
-<label class="inline" id="rangeWrap">时间范围<select id="range"><option value="3">最近 3 小时</option><option value="6">最近 6 小时</option>
-<option value="12">最近 12 小时</option><option value="24" selected>最近 24 小时</option>
-<option value="72">最近 3 天</option><option value="168">最近 7 天</option><option value="504">最近 21 天</option></select></label></header>
+<div class="range" id="rangeWrap"><label class="inline">时间范围<select id="range"><option value="all" selected>全部记录</option><option value="3">最近 3 小时</option><option value="6">最近 6 小时</option>
+<option value="12">最近 12 小时</option><option value="24">最近 24 小时</option>
+<option value="72">最近 3 天</option><option value="168">最近 7 天</option><option value="504">最近 21 天</option><option value="custom" disabled>自定义起止</option></select></label>
+<span class="range"><input type="datetime-local" id="rangeFrom" aria-label="起点（留空表示第一条记录）" title="留空表示从第一条记录开始">至<input type="datetime-local" id="rangeTo" aria-label="终点（留空表示现在）" title="留空表示到现在"><button type="button" class="secondary" id="toNow">到现在</button></span></div></header>
 <section id="stats" class="grid"><div class="card stat"><div class="label">当前温度</div><div id="temp" class="value">--.--℃</div></div>
 <div class="card stat"><div class="label">制冷状态</div><div id="control" class="value">--</div></div>
 <div class="card stat"><div class="label">启动温度</div><div id="start" class="value">--℃</div></div>
@@ -114,24 +115,29 @@ button:disabled{opacity:.45;cursor:default}.actions{display:flex;gap:12px;flex-w
 const $=s=>document.querySelector(s),chart=echarts.init($("#chart"));let points=[],editing=false;
 ["#target","#startInput","#stopInput"].forEach(selector=>$(selector).addEventListener("input",()=>editing=true));
 const GAP_MS=35000;
-function draw(raw,grav=[],brew=null){let d=[];raw.forEach((p,i)=>{if(i&&new Date(p.time)-new Date(raw[i-1].time)>GAP_MS)d.push({time:p.time,gap:true});d.push(p)});
-// Gravity: measured OG at the brew start, then the manual readings.
+function draw(raw,grav=[],brew=null,win=null){let d=[];raw.forEach((p,i)=>{if(i&&new Date(p.time)-new Date(raw[i-1].time)>GAP_MS)d.push({time:p.time,gap:true});d.push(p)});
+// Gravity: measured OG at the brew start, then the manual readings; only those inside the window affect scaling.
 let gp=grav.map(g=>[g.time,g.gravity,g.note]);if(brew&&brew.og&&brew.started_at)gp.unshift([brew.started_at,brew.og,"OG"]);
-points=d;let values=raw.flatMap(p=>[p.temperature,p.target,p.start,p.stop]).filter(Number.isFinite);
+if(win)gp=gp.filter(([t])=>new Date(t)>=win.from&&new Date(t)<=win.to);
+points=d;let est=raw.filter(p=>Number.isFinite(p.estimate)),values=raw.flatMap(p=>[p.temperature,p.target,p.start,p.stop,p.estimate]).filter(Number.isFinite);
 if(!values.length&&!gp.length){chart.setOption({graphic:{type:"text",left:"center",top:"middle",style:{text:"暂无温度记录",fill:"#8a97ab",fontSize:16}}},{notMerge:true});return}
 let lo=values.length?Math.floor(Math.min(...values)-1):15,hi=values.length?Math.ceil(Math.max(...values)+1):25;
 if(hi-lo<4){let center=(lo+hi)/2;lo=Math.floor(center-2);hi=Math.ceil(center+2)}
 let line=(name,key,color)=>({name,type:"line",data:d.map(p=>[p.time,p.gap?null:p[key]]),step:"end",symbol:"none",lineStyle:{color,type:"dashed",width:2},tooltip:{show:false}});
 let yAxis=[{type:"value",name:"温度（℃）",min:lo,max:hi,interval:1,axisLabel:{color:"#718096",formatter:"{value}℃"},splitLine:{lineStyle:{color:"#edf1f6"}}}],
 series=[{name:"实际温度",type:"line",data:d.map(p=>[p.time,p.gap?null:p.temperature]),smooth:true,symbol:"none",lineStyle:{width:3},areaStyle:{color:"#3978df12"}},line("目标温度","target","#e6a817"),line("启动温度","start","#df6b5d"),line("停止温度","stop","#36a269")];
+// Liquid estimate: one point at the end of each complete cooler-off rise, joined smoothly.
+// Liquid estimate: one point at the end of each cooler-off period; the open (still running) period is the live value.
+if(est.length)series.push({name:"估计液温",type:"line",data:est.map(p=>({value:[p.time,p.estimate],symbol:p.estimate_live?"diamond":"circle",symbolSize:p.estimate_live?10:6})),smooth:true,lineStyle:{width:2.5,color:"#c2410c"},itemStyle:{color:"#c2410c"}});
 if(gp.length){yAxis.push({type:"value",name:"比重",position:"right",scale:true,splitLine:{show:false},axisLabel:{color:"#8e5bd8",formatter:v=>v.toFixed(3)}});
 series.push({name:"比重",type:"line",yAxisIndex:1,data:gp,symbol:"circle",symbolSize:8,lineStyle:{width:2,color:"#8e5bd8"},itemStyle:{color:"#8e5bd8"}})}
-const fmtTip=items=>{let t=items.find(i=>i.seriesName==="实际温度"),g=items.find(i=>i.seriesName==="比重"),out=[];
+const fmtTip=items=>{let t=items.find(i=>i.seriesName==="实际温度"),g=items.find(i=>i.seriesName==="比重"),e=items.find(i=>i.seriesName==="估计液温"),out=[];
 let p=t&&d[t.dataIndex];if(p&&!p.gap)out.push(new Date(p.time).toLocaleString(),"<b>实际温度："+p.temperature.toFixed(2)+"℃</b>","目标："+p.target.toFixed(2)+"℃ · 启动："+p.start.toFixed(2)+"℃ · 停止："+p.stop.toFixed(2)+"℃",p.cooler_on?"制冷中":"制冷停止");
+if(e){let q=est[e.dataIndex];out.push("<b>估计液温："+q.estimate.toFixed(2)+"℃</b>（"+new Date(q.time).toLocaleTimeString()+(q.estimate_live?"，实时":"")+"）","停机 "+q.estimate_off_min+" 分钟内逐点估计 "+q.estimate_range[0].toFixed(2)+"～"+q.estimate_range[1].toFixed(2)+"℃ · T液 = T气 + 3min × 升温斜率")}
 if(g){let [gt,gv,note]=gp[g.dataIndex];if(!p||Math.abs(new Date(gt)-new Date(p.time))<1800000)out.push("<b>比重："+gv.toFixed(3)+"</b>（"+new Date(gt).toLocaleString()+(note?" · "+esc(note):"")+"）")}return out.join("<br>")};
 chart.setOption({animation:false,color:["#3978df","#e6a817","#df6b5d","#36a269","#8e5bd8"],grid:{left:58,right:gp.length?64:24,top:44,bottom:58},legend:{top:0,left:"center"},
 tooltip:{trigger:"axis",axisPointer:{type:"cross"},backgroundColor:"#172033",borderWidth:0,textStyle:{color:"#fff"},formatter:fmtTip},
-xAxis:{type:"time",name:"时间",nameLocation:"middle",nameGap:36,axisLabel:{color:"#718096"},axisLine:{lineStyle:{color:"#cbd5e1"}},splitLine:{show:false}},
+xAxis:{type:"time",name:"时间",nameLocation:"middle",nameGap:36,min:win?win.from.getTime():null,max:win?win.to.getTime():null,axisLabel:{color:"#718096",hideOverlap:true},axisLine:{lineStyle:{color:"#cbd5e1"}},splitLine:{show:false}},
 yAxis,series},{notMerge:true});}
 const STATUS={draft:"草稿",active:"进行中",ended:"已结束"},SUGAR_DEFAULT={honey:80,sugar:100,juice:12,fruit:10,other:50},
 CATEGORY={honey:"蜂蜜",sugar:"糖",juice:"果汁",fruit:"水果",other:"其他"},SUCROSE_POINTS=384;let brews=[];
@@ -181,9 +187,22 @@ if(d.og&&d.fg_measured)parts.push("实际酒精度 "+Math.max(0,(d.og-d.fg_measu
 async function update(){try{let s=await(await fetch("/api/status")).json();if(s.temperature!==null){$("#temp").textContent=s.temperature.toFixed(2)+"℃";$("#control").textContent=s.cooler_on?"制冷中":"已停止";$("#control").className="value "+(s.cooler_on?"error":"ok");$("#start").textContent=s.start.toFixed(2)+"℃";$("#stop").textContent=s.stop.toFixed(2)+"℃";if(!editing){$("#target").value=s.target;$("#startInput").value=s.start;$("#stopInput").value=s.stop}$("#status").textContent="电脑服务在线 · ESP32 "+(s.online?"在线":"暂时离线");}
 let brew=s.active_brew;if(view==="overview")$("#viewSub").textContent=brew?`进行中：#${brew.id} ${brew.title}${brew.volume_l?"（"+brew.volume_l+" L）":""}`:"没有进行中的酿造，开始酿造后才会记录温度";
 let sel=selectedBrew(),id=view==="overview"?(brew&&brew.id):view==="brew"&&sel&&sel.status!=="draft"?sel.id:null;
-if(view!=="overview"&&!id)return;if(!id){draw([]);return}let q="&brew_id="+id;
-let h=await(await fetch("/api/history?hours="+$("#range").value+q)).json(),g=await(await fetch("/api/brews/"+id+"/gravity")).json();
-draw(h,g,brews.find(x=>x.id===id))}catch(e){$("#status").textContent="服务连接失败："+e.message}}
+if(view!=="overview"&&!id)return;if(!id){draw([]);return}let b=brews.find(x=>x.id===id),win=rangeWindow(b);if(!win)return;
+let h=await(await fetch("/api/history?brew_id="+id+win.query)).json(),g=await(await fetch("/api/brews/"+id+"/gravity")).json();
+// "All records": the axis spans the first to the last stored sample; an empty custom start means the first sample.
+if(win.all)win=h.length?{from:new Date(h[0].time),to:new Date(h[h.length-1].time)}:null;
+else if(!win.from)win=h.length?{from:new Date(h[0].time),to:win.to}:null;
+draw(h,g,b,win)}catch(e){$("#status").textContent="服务连接失败："+e.message}}
+// Chart window: all = first to last record (also used for ended brews); preset = [now - hours, now];
+// custom (any start/end entered) = [start or first record, end or now].
+function rangeWindow(b){let now=new Date(),v=$("#range").value,from=null,to=now;
+if($("#rangeWrap").style.display==="none")return {all:true,query:""};
+if(v==="all")return {all:true,query:"&all=1"};
+if(v==="custom"){if($("#rangeFrom").value)from=new Date($("#rangeFrom").value);if($("#rangeTo").value)to=new Date($("#rangeTo").value);
+if((from&&isNaN(from))||isNaN(to)||(from&&from>=to)){$("#status").textContent="自定义时间范围无效：起点必须早于终点";return null}
+return {from,to,query:(from?"&from="+from.toISOString():"&all=1")+"&to="+to.toISOString()}}
+from=new Date(now-v*3600000);
+return {from,to,query:"&from="+from.toISOString()+"&to="+to.toISOString()}}
 const localNow=()=>{let d=new Date();d.setMinutes(d.getMinutes()-d.getTimezoneOffset());return d.toISOString().slice(0,16)};
 async function loadGravity(id){let rows=id?await(await fetch("/api/brews/"+id+"/gravity")).json():[],b=selectedBrew(),og=b&&b.og;
 $("#gravityRows").innerHTML=rows.map(g=>`<tr><td>${new Date(g.time).toLocaleString()}</td><td>${g.gravity.toFixed(3)}</td><td>${og?Math.max(0,(og-g.gravity)*131.25).toFixed(1)+"%":"-"}</td><td>${esc(g.note)}</td><td><button type="button" class="ghost" data-gid="${g.id}">删除</button></td></tr>`).join("")||'<tr><td colspan="5" class="muted">暂无比重记录</td></tr>';
@@ -216,7 +235,11 @@ if(need<=0){msg("其他原料已达到目标 OG，无需补足",false);return}le
 $("#fermRows").children[idx].querySelector(".fa").value=amount.toFixed(2);msg((b.name||CATEGORY[b.category])+" 需要约 "+amount.toFixed(2)+" "+b.unit,true)};
 ["#fOg","#fFgExp","#fFgMeas"].forEach(id=>$(id).addEventListener("input",()=>showAbv()));
 document.querySelectorAll(".nav[data-view]").forEach(a=>a.onclick=()=>go(a.dataset.view));$("#newBrew").onclick=()=>go("new");
-window.addEventListener("resize",()=>chart.resize());$("#range").onchange=update;
+window.addEventListener("resize",()=>chart.resize());
+// Picking a preset clears the custom start/end; entering either one switches to the custom window.
+$("#range").onchange=()=>{$("#rangeFrom").value="";$("#rangeTo").value="";update()};
+const customChanged=()=>{let any=$("#rangeFrom").value||$("#rangeTo").value;$("#range").value=any?"custom":"all";update()};
+$("#rangeFrom").onchange=customChanged;$("#rangeTo").onchange=customChanged;$("#toNow").onclick=()=>{$("#rangeTo").value="";customChanged()};
 refreshBrews().then(()=>go("overview"));setInterval(update,10000);
 $("#settings").onsubmit=async e=>{e.preventDefault();let target=+$("#target").value,start=+$("#startInput").value,stop=+$("#stopInput").value;if(![target,start,stop].every(Number.isFinite)){$("#message").textContent="请输入三个温度值";$("#message").className="error";return}if(!(stop<target&&target<start)){$("#message").textContent="必须满足 停止 < 目标 < 启动";$("#message").className="error";return}let r=await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({target,start,stop})});let d=await r.json();$("#message").textContent=d.ok?"已保存并下发":"下发失败："+d.error;$("#message").className=d.ok?"ok":"error";if(d.ok){editing=false;update()}};
 </script></main></div></body></html>"""
@@ -414,6 +437,54 @@ def load_brews(connection, brew_id=None):
     return brews
 
 
+# Liquid estimate, prior model (not fitted to the curve): with the cooler off the air is warmed by the liquid,
+#   dT_air/dt = (T_liquid - T_air) / TAU   =>   T_liquid = T_air + TAU * dT_air/dt
+# TAU is a 3 min prior; the slope is a line fit over the last 2 min, used from 5 min after switch-off (the cold
+# heat sink dominates before that). One value per off period: the median. Same as estimate_liquid_temperature.py.
+LIQUID_TAU_MIN, ESTIMATE_FROM_MIN, SLOPE_WINDOW_MIN = 3.0, 5.0, 2.0
+
+
+def line_fit(xs, ys):
+    """Least-squares line; returns (slope, intercept)."""
+    n, mx, my = len(xs), sum(xs) / len(xs), sum(ys) / len(ys)
+    sxx = sum((x - mx) ** 2 for x in xs)
+    slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx if sxx else 0.0
+    return slope, my - slope * mx
+
+
+def add_liquid_estimates(points, gap_seconds=35):
+    """Attach one estimate to the last sample of every cooler-off period that follows an ON sample."""
+    times = [datetime.fromisoformat(p["time"]) for p in points]
+    i = 0
+    while i < len(points):
+        if points[i]["cooler_on"]:
+            i += 1
+            continue
+        j = i
+        while (j + 1 < len(points) and not points[j + 1]["cooler_on"]
+               and (times[j + 1] - times[j]).total_seconds() <= gap_seconds):
+            j += 1
+        # The off time is only known when the period starts right after an ON sample.
+        if i > 0 and points[i - 1]["cooler_on"] and (times[i] - times[i - 1]).total_seconds() <= gap_seconds:
+            minutes = [(t - times[i]).total_seconds() / 60 for t in times[i:j + 1]]
+            temps = [p["temperature"] for p in points[i:j + 1]]
+            values = []
+            for k, at in enumerate(minutes):
+                if at >= ESTIMATE_FROM_MIN:
+                    w = [m for m in range(k + 1) if minutes[m] > at - SLOPE_WINDOW_MIN]
+                    slope, intercept = line_fit([minutes[m] for m in w], [temps[m] for m in w])
+                    values.append(intercept + slope * at + LIQUID_TAU_MIN * slope)
+            if values:
+                values.sort()
+                mid = len(values) // 2
+                live = j + 1 >= len(points) or not points[j + 1]["cooler_on"]
+                points[j].update(estimate=round((values[mid] + values[~mid]) / 2, 2), estimate_live=live,
+                                 estimate_range=[round(values[0], 2), round(values[-1], 2)],
+                                 estimate_off_min=round(minutes[-1], 1))
+        i = j + 1
+    return points
+
+
 def iso_from_ms(ms):
     return datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat(timespec="microseconds")
 
@@ -560,15 +631,28 @@ class Handler(BaseHTTPRequestHandler):
                 return
             since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
             until = datetime.now(timezone.utc).isoformat()
+            # Optional explicit window (ISO times, e.g. from the custom range picker).
+            try:
+                window = [datetime.fromisoformat(query[k][0].replace("Z", "+00:00")).astimezone(timezone.utc).isoformat(timespec="microseconds")
+                          if query.get(k) else None for k in ("from", "to")]
+            except ValueError:
+                self.send_json({"error": "from/to 必须是 ISO 时间"}, 400)
+                return
+            if window[0] and window[1] and window[0] >= window[1]:
+                self.send_json({"error": "起点必须早于终点"}, 400)
+                return
+            since, until = window[0] or since, min(window[1] or until, until)
+            if query.get("all"):
+                since = ""  # Clamped to the brew start below: the whole brew.
             with DB_LOCK, db() as connection:
                 if brew_id is not None:
                     brew = connection.execute("SELECT started_at,ended_at,status FROM brews WHERE id=?", (brew_id,)).fetchone()
                     if not brew or not brew[0]:
                         self.send_json([])
                         return
-                    # Active brews follow the selected range; finished brews show start to end.
-                    since = max(brew[0], since) if brew[2] == "active" else brew[0]
-                    until = brew[1] or until
+                    # Active brews and explicit windows follow the selected range; otherwise finished brews show start to end.
+                    since = max(brew[0], since) if brew[2] == "active" or window[0] else brew[0]
+                    until = min(brew[1], until) if brew[1] and window[1] else brew[1] or until
                 rows = connection.execute(
                     """SELECT t.received_at,t.temperature,t.cooler_on,
                     (SELECT h.target FROM config_history h WHERE h.changed_at<=t.received_at ORDER BY h.id DESC LIMIT 1),
@@ -578,8 +662,8 @@ class Handler(BaseHTTPRequestHandler):
                     ORDER BY t.received_at""",
                     (since, until, brew_id, brew_id),
                 ).fetchall()
-            self.send_json([{"time": row[0], "temperature": row[1], "cooler_on": bool(row[2]),
-                            "target": row[3], "start": row[4], "stop": row[5]} for row in rows])
+            self.send_json(add_liquid_estimates([{"time": row[0], "temperature": row[1], "cooler_on": bool(row[2]),
+                            "target": row[3], "start": row[4], "stop": row[5]} for row in rows]))
             return
         self.send_error(404)
 

@@ -21,8 +21,15 @@ its slope:
   heat sink still pulls the air down.
 - One value per cooler-off period: the median of its per-sample estimates.
   An ongoing off period gives the live estimate.
-- Room heat leaking in is ignored, so with a warm room the estimate reads a
-  little high.
+- Room heat leaking in keeps the air above the liquid.  Without a room
+  sensor this is a constant correction, LIQUID_OFFSET = 0.6 C, calibrated on
+  two hand measurements (2026-10-14 21:30 18.0 C, 2026-10-15 22:40 17.5 C:
+  the uncorrected estimates were 0.56 and 0.61 C high).  It depends on the
+  room temperature, so it is only valid for a similar room.
+- Door openings are detected and excluded: air rising faster than 0.3 C/min
+  although the cooler has been on for 1 min, or faster than 1.2 C/min at any
+  time (normal maximum 0.84 / 1.05).  Excluded window: 1 min before to 15 min
+  after; off periods touching it get no estimate.
 
 computer_server.py implements the same procedure in pure Python.
 
@@ -50,9 +57,32 @@ plt.rcParams["font.sans-serif"] = [
 plt.rcParams["axes.unicode_minus"] = False
 
 TAU_MIN = 3.0  # Prior air <-> liquid time constant.
+LIQUID_OFFSET = 0.6  # Room heat correction, calibrated on two hand measurements.
 ESTIMATE_FROM_MIN = 5.0  # Skip the first minutes after switch-off.
 SLOPE_WINDOW_MIN = 2.0
 GAP_SECONDS = 35
+# Door detection on the 1-minute slope (C/min).
+DOOR_RISE_WHILE_ON, DOOR_RISE_ANY, DOOR_ON_SETTLE_MIN = 0.3, 1.2, 1.0
+DOOR_BEFORE_MIN, DOOR_AFTER_MIN = 1.0, 15.0
+
+
+def anomaly_mask(df: pd.DataFrame) -> pd.Series:
+    """True for samples inside a detected door-opening window."""
+    t = (df["received_at"] - df["received_at"].iloc[0]).dt.total_seconds().to_numpy() / 60
+    y, on = df["temperature"].to_numpy(), df["cooler_on"].to_numpy()
+    on_start = pd.Series(np.where(on & ~np.r_[False, on[:-1]], t, np.nan)).ffill().to_numpy()
+    hits = []
+    starts = np.searchsorted(t, t - 1.0, side="right")
+    for k in range(len(t)):
+        xs, ys = t[starts[k]:k + 1], y[starts[k]:k + 1]
+        slope = np.polyfit(xs, ys, 1)[0] if len(xs) >= 3 else 0.0
+        settled = on[k] and t[k] - on_start[k] >= DOOR_ON_SETTLE_MIN
+        if (settled and slope > DOOR_RISE_WHILE_ON) or slope > DOOR_RISE_ANY:
+            hits.append(t[k])
+    mask = np.zeros(len(t), bool)
+    for h in hits:
+        mask[np.searchsorted(t, h - DOOR_BEFORE_MIN):np.searchsorted(t, h + DOOR_AFTER_MIN, side="right")] = True
+    return pd.Series(mask, index=df.index)
 
 
 def load_temperature(db_path: Path, brew_id: int | None) -> pd.DataFrame:
@@ -95,20 +125,22 @@ def estimate_period(run: pd.DataFrame) -> pd.Series:
     for k in np.flatnonzero(t >= ESTIMATE_FROM_MIN):
         m = (t > t[k] - SLOPE_WINDOW_MIN) & (t <= t[k])
         slope, intercept = np.polyfit(t[m], y[m], 1)
-        out[k] = slope * t[k] + intercept + TAU_MIN * slope
+        out[k] = slope * t[k] + intercept + TAU_MIN * slope - LIQUID_OFFSET
     return pd.Series(out, index=run.index)
 
 
-def make_plots(df, periods, results, output_dir: Path, label: str) -> None:
+def make_plots(df, periods, results, anomaly, output_dir: Path, label: str) -> None:
     fig, ax = plt.subplots(figsize=(15, 7))
     ax.plot(df["received_at"], df["temperature"], color="#6b7280", linewidth=1, alpha=0.6, label="空气温度")
+    ax.fill_between(df["received_at"], 0, 1, where=anomaly.to_numpy(), transform=ax.get_xaxis_transform(),
+                    color="tab:purple", alpha=0.2, label="开门/异常（不计算）")
     for index, (run, est) in enumerate(periods):
         ax.plot(run["received_at"], est, color="tab:orange", linewidth=1, alpha=0.6,
                 label="逐点估计" if index == 0 else None)
     res = pd.DataFrame(results)
     ax.plot(res["time"], res["liquid"], color="tab:red", linewidth=2, marker="o", markersize=5,
             label="每次停机的液温估计（中位数）")
-    ax.set_title(f"液温估计：T液 = T气 + τ·dT气/dt，τ = {TAU_MIN:g} min（{label}）")
+    ax.set_title(f"液温估计：T液 = T气 + τ·dT气/dt − {LIQUID_OFFSET:g}，τ = {TAU_MIN:g} min（{label}）")
     ax.set_xlabel("时间（UTC）")
     ax.set_ylabel("温度 / °C")
     ax.grid(alpha=0.25)
@@ -141,8 +173,11 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     df = load_temperature(args.database, args.brew_id)
+    anomaly = anomaly_mask(df)
     periods, results = [], []
     for run in off_periods(df):
+        if anomaly[run.index].any():
+            continue
         est = estimate_period(run)
         if est.notna().any():
             periods.append((run, est))
@@ -162,9 +197,10 @@ def main() -> None:
 
     res = pd.DataFrame(results)
     res.to_csv(args.output_dir / "temperature_cycle_estimates.csv", index=False)
-    make_plots(df, periods, results, args.output_dir, f"brew {args.brew_id}" if args.brew_id else "all brews")
+    make_plots(df, periods, results, anomaly, args.output_dir, f"brew {args.brew_id}" if args.brew_id else "all brews")
     shown = res.assign(off_start=(res["off_start"] + pd.Timedelta(hours=8)).dt.strftime("%m-%d %H:%M"))
-    print(f"T_liquid = T_air + {TAU_MIN:g} * slope（停机 {ESTIMATE_FROM_MIN:g} 分钟后，斜率窗口 {SLOPE_WINDOW_MIN:g} 分钟）；时间为北京时间\n")
+    print(f"T_liquid = T_air + {TAU_MIN:g} * slope - {LIQUID_OFFSET:g}（停机 {ESTIMATE_FROM_MIN:g} 分钟后，斜率窗口 {SLOPE_WINDOW_MIN:g} 分钟）；时间为北京时间")
+    print(f"开门/异常排除样本：{int(anomaly.sum())} 个\n")
     print(shown.drop(columns="time").to_string(index=False, float_format=lambda v: f"{v:.2f}"))
     print(f"\n输出目录: {args.output_dir.resolve()}")
 

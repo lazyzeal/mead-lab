@@ -124,12 +124,16 @@ if(!values.length&&!gp.length){chart.setOption({graphic:{type:"text",left:"cente
 let lo=values.length?Math.floor(Math.min(...values)-1):15,hi=values.length?Math.ceil(Math.max(...values)+1):25;
 if(hi-lo<4){let center=(lo+hi)/2;lo=Math.floor(center-2);hi=Math.ceil(center+2)}
 let line=(name,key,color)=>({name,type:"line",data:d.map(p=>[p.time,p.gap?null:p[key]]),step:"end",symbol:"none",lineStyle:{color,type:"dashed",width:2},tooltip:{show:false}});
+// Door-opening windows (no liquid estimate there), shaded on the chart.
+let doors=[];raw.forEach((p,i)=>{if(!p.anomaly)return;let prev=i&&raw[i-1].anomaly;if(prev)doors[doors.length-1][1]={xAxis:p.time};else doors.push([{xAxis:p.time},{xAxis:p.time}])});
 let yAxis=[{type:"value",name:"温度（℃）",min:lo,max:hi,interval:1,axisLabel:{color:"#718096",formatter:"{value}℃"},splitLine:{lineStyle:{color:"#edf1f6"}}}],
-series=[{name:"实际温度",type:"line",data:d.map(p=>[p.time,p.gap?null:p.temperature]),smooth:true,symbol:"none",lineStyle:{width:3},areaStyle:{color:"#3978df12"}},line("目标温度","target","#e6a817"),line("启动温度","start","#df6b5d"),line("停止温度","stop","#36a269")];
+series=[{name:"实际温度",type:"line",data:d.map(p=>[p.time,p.gap?null:p.temperature]),smooth:true,symbol:"none",lineStyle:{width:3},areaStyle:{color:"#3978df12"},markArea:{silent:true,itemStyle:{color:"#8e5bd826"},label:{show:false},data:doors}},line("目标温度","target","#e6a817"),line("启动温度","start","#df6b5d"),line("停止温度","stop","#36a269")];
 // Liquid estimate: one point at the end of each complete cooler-off rise, joined smoothly.
 // Liquid estimate: one point at the end of each cooler-off period; the open (still running) period is the live value.
 if(est.length)series.push({name:"估计液温",type:"line",data:est.map(p=>({value:[p.time,p.estimate],symbol:p.estimate_live?"diamond":"circle",symbolSize:p.estimate_live?10:6})),smooth:true,lineStyle:{width:2.5,color:"#c2410c"},itemStyle:{color:"#c2410c"}});
-if(gp.length){yAxis.push({type:"value",name:"比重",position:"right",scale:true,splitLine:{show:false},axisLabel:{color:"#8e5bd8",formatter:v=>v.toFixed(3)}});
+// Gravity axis: pad the readings so they sit in the middle half of the chart instead of spanning its full height.
+if(gp.length){let gv=gp.map(g=>g[1]),gLo=Math.min(...gv),gHi=Math.max(...gv),pad=Math.max((gHi-gLo)*0.5,0.005);
+yAxis.push({type:"value",name:"比重",position:"right",min:+(gLo-pad).toFixed(3),max:+(gHi+pad).toFixed(3),splitLine:{show:false},axisLabel:{color:"#8e5bd8",formatter:v=>v.toFixed(3)}});
 series.push({name:"比重",type:"line",yAxisIndex:1,data:gp,symbol:"circle",symbolSize:8,lineStyle:{width:2,color:"#8e5bd8"},itemStyle:{color:"#8e5bd8"}})}
 const fmtTip=items=>{let t=items.find(i=>i.seriesName==="实际温度"),g=items.find(i=>i.seriesName==="比重"),e=items.find(i=>i.seriesName==="估计液温"),out=[];
 let p=t&&d[t.dataIndex];if(p&&!p.gap)out.push(new Date(p.time).toLocaleString(),"<b>实际温度："+p.temperature.toFixed(2)+"℃</b>","目标："+p.target.toFixed(2)+"℃ · 启动："+p.start.toFixed(2)+"℃ · 停止："+p.stop.toFixed(2)+"℃",p.cooler_on?"制冷中":"制冷停止");
@@ -190,7 +194,9 @@ let sel=selectedBrew(),id=view==="overview"?(brew&&brew.id):view==="brew"&&sel&&
 if(view!=="overview"&&!id)return;if(!id){draw([]);return}let b=brews.find(x=>x.id===id),win=rangeWindow(b);if(!win)return;
 let h=await(await fetch("/api/history?brew_id="+id+win.query)).json(),g=await(await fetch("/api/brews/"+id+"/gravity")).json();
 // "All records": the axis spans the first to the last stored sample; an empty custom start means the first sample.
-if(win.all)win=h.length?{from:new Date(h[0].time),to:new Date(h[h.length-1].time)}:null;
+// "All records": the axis spans the first to the last record, including the OG at the brew start and gravity readings.
+if(win.all){let ts=h.map(p=>p.time).concat(g.map(x=>x.time));if(b&&b.og&&b.started_at)ts.push(b.started_at);ts=ts.map(x=>new Date(x).getTime());
+win=ts.length?{from:new Date(Math.min(...ts)),to:new Date(Math.max(...ts))}:null}
 else if(!win.from)win=h.length?{from:new Date(h[0].time),to:win.to}:null;
 draw(h,g,b,win)}catch(e){$("#status").textContent="服务连接失败："+e.message}}
 // Chart window: all = first to last record (also used for ended brews); preset = [now - hours, now];
@@ -438,10 +444,13 @@ def load_brews(connection, brew_id=None):
 
 
 # Liquid estimate, prior model (not fitted to the curve): with the cooler off the air is warmed by the liquid,
-#   dT_air/dt = (T_liquid - T_air) / TAU   =>   T_liquid = T_air + TAU * dT_air/dt
+#   dT_air/dt = (T_liquid - T_air) / TAU   =>   T_liquid = T_air + TAU * dT_air/dt - OFFSET
 # TAU is a 3 min prior; the slope is a line fit over the last 2 min, used from 5 min after switch-off (the cold
-# heat sink dominates before that). One value per off period: the median. Same as estimate_liquid_temperature.py.
-LIQUID_TAU_MIN, ESTIMATE_FROM_MIN, SLOPE_WINDOW_MIN = 3.0, 5.0, 2.0
+# heat sink dominates before that). OFFSET = 0.6 ℃ is room heat keeping the air above the liquid, calibrated on two
+# hand measurements. One value per off period: the median. Same as estimate_liquid_temperature.py.
+LIQUID_TAU_MIN, LIQUID_OFFSET, ESTIMATE_FROM_MIN, SLOPE_WINDOW_MIN = 3.0, 0.6, 5.0, 2.0
+# Door openings (1-minute slope, ℃/min): rising although cooling for 1 min, or rising faster than ever happens normally.
+DOOR_RISE_WHILE_ON, DOOR_RISE_ANY, DOOR_ON_SETTLE_MIN, DOOR_BEFORE_MIN, DOOR_AFTER_MIN = 0.3, 1.2, 1.0, 1.0, 15.0
 
 
 def line_fit(xs, ys):
@@ -452,9 +461,32 @@ def line_fit(xs, ys):
     return slope, my - slope * mx
 
 
+def mark_door_openings(points, times):
+    """Set point["anomaly"] inside detected door-opening windows; returns the per-point flags."""
+    minutes = [(t - times[0]).total_seconds() / 60 for t in times]
+    hits, lo, on_start = [], 0, None
+    for k, p in enumerate(points):
+        if p["cooler_on"] and (k == 0 or not points[k - 1]["cooler_on"]):
+            on_start = minutes[k]
+        while minutes[lo] <= minutes[k] - 1.0:
+            lo += 1
+        slope = line_fit(minutes[lo:k + 1], [q["temperature"] for q in points[lo:k + 1]])[0] if k - lo >= 2 else 0.0
+        settled = p["cooler_on"] and on_start is not None and minutes[k] - on_start >= DOOR_ON_SETTLE_MIN
+        if (settled and slope > DOOR_RISE_WHILE_ON) or slope > DOOR_RISE_ANY:
+            hits.append(minutes[k])
+    flags, h = [False] * len(points), 0
+    for k, m in enumerate(minutes):
+        while h < len(hits) and hits[h] + DOOR_AFTER_MIN < m:
+            h += 1
+        if h < len(hits) and hits[h] - DOOR_BEFORE_MIN <= m:
+            flags[k] = points[k]["anomaly"] = True
+    return flags
+
+
 def add_liquid_estimates(points, gap_seconds=35):
     """Attach one estimate to the last sample of every cooler-off period that follows an ON sample."""
     times = [datetime.fromisoformat(p["time"]) for p in points]
+    anomaly = mark_door_openings(points, times) if points else []
     i = 0
     while i < len(points):
         if points[i]["cooler_on"]:
@@ -464,8 +496,9 @@ def add_liquid_estimates(points, gap_seconds=35):
         while (j + 1 < len(points) and not points[j + 1]["cooler_on"]
                and (times[j + 1] - times[j]).total_seconds() <= gap_seconds):
             j += 1
-        # The off time is only known when the period starts right after an ON sample.
-        if i > 0 and points[i - 1]["cooler_on"] and (times[i] - times[i - 1]).total_seconds() <= gap_seconds:
+        # The off time is only known when the period starts right after an ON sample; door openings are skipped.
+        if (i > 0 and points[i - 1]["cooler_on"] and (times[i] - times[i - 1]).total_seconds() <= gap_seconds
+                and not any(anomaly[i:j + 1])):
             minutes = [(t - times[i]).total_seconds() / 60 for t in times[i:j + 1]]
             temps = [p["temperature"] for p in points[i:j + 1]]
             values = []
@@ -473,7 +506,7 @@ def add_liquid_estimates(points, gap_seconds=35):
                 if at >= ESTIMATE_FROM_MIN:
                     w = [m for m in range(k + 1) if minutes[m] > at - SLOPE_WINDOW_MIN]
                     slope, intercept = line_fit([minutes[m] for m in w], [temps[m] for m in w])
-                    values.append(intercept + slope * at + LIQUID_TAU_MIN * slope)
+                    values.append(intercept + slope * at + LIQUID_TAU_MIN * slope - LIQUID_OFFSET)
             if values:
                 values.sort()
                 mid = len(values) // 2

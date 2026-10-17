@@ -115,13 +115,15 @@ button:disabled{opacity:.45;cursor:default}.actions{display:flex;gap:12px;flex-w
 const $=s=>document.querySelector(s),chart=echarts.init($("#chart"));let points=[],editing=false;
 ["#target","#startInput","#stopInput"].forEach(selector=>$(selector).addEventListener("input",()=>editing=true));
 const GAP_MS=35000;
+// Math.min(...arr) passes every element as an argument and overflows the call stack for long histories.
+const arrMin=a=>a.reduce((m,v)=>v<m?v:m,Infinity),arrMax=a=>a.reduce((m,v)=>v>m?v:m,-Infinity);
 function draw(raw,grav=[],brew=null,win=null){let d=[];raw.forEach((p,i)=>{if(i&&new Date(p.time)-new Date(raw[i-1].time)>GAP_MS)d.push({time:p.time,gap:true});d.push(p)});
 // Gravity: measured OG at the brew start, then the manual readings; only those inside the window affect scaling.
 let gp=grav.map(g=>[g.time,g.gravity,g.note]);if(brew&&brew.og&&brew.started_at)gp.unshift([brew.started_at,brew.og,"OG"]);
 if(win)gp=gp.filter(([t])=>new Date(t)>=win.from&&new Date(t)<=win.to);
 points=d;let est=raw.filter(p=>Number.isFinite(p.estimate)),values=raw.flatMap(p=>[p.temperature,p.target,p.start,p.stop,p.estimate]).filter(Number.isFinite);
 if(!values.length&&!gp.length){chart.setOption({graphic:{type:"text",left:"center",top:"middle",style:{text:"暂无温度记录",fill:"#8a97ab",fontSize:16}}},{notMerge:true});return}
-let lo=values.length?Math.floor(Math.min(...values)-1):15,hi=values.length?Math.ceil(Math.max(...values)+1):25;
+let lo=values.length?Math.floor(arrMin(values)-1):15,hi=values.length?Math.ceil(arrMax(values)+1):25;
 if(hi-lo<4){let center=(lo+hi)/2;lo=Math.floor(center-2);hi=Math.ceil(center+2)}
 let line=(name,key,color)=>({name,type:"line",data:d.map(p=>[p.time,p.gap?null:p[key]]),step:"end",symbol:"none",lineStyle:{color,type:"dashed",width:2},tooltip:{show:false}});
 // Door-opening windows (no liquid estimate there), shaded on the chart.
@@ -132,7 +134,7 @@ series=[{name:"实际温度",type:"line",data:d.map(p=>[p.time,p.gap?null:p.temp
 // Liquid estimate: one point at the end of each cooler-off period; the open (still running) period is the live value.
 if(est.length)series.push({name:"估计液温",type:"line",data:est.map(p=>({value:[p.time,p.estimate],symbol:p.estimate_live?"diamond":"circle",symbolSize:p.estimate_live?10:6})),smooth:true,lineStyle:{width:2.5,color:"#c2410c"},itemStyle:{color:"#c2410c"}});
 // Gravity axis: pad the readings so they sit in the middle half of the chart instead of spanning its full height.
-if(gp.length){let gv=gp.map(g=>g[1]),gLo=Math.min(...gv),gHi=Math.max(...gv),pad=Math.max((gHi-gLo)*0.5,0.005);
+if(gp.length){let gv=gp.map(g=>g[1]),gLo=arrMin(gv),gHi=arrMax(gv),pad=Math.max((gHi-gLo)*0.5,0.005);
 yAxis.push({type:"value",name:"比重",position:"right",min:+(gLo-pad).toFixed(3),max:+(gHi+pad).toFixed(3),splitLine:{show:false},axisLabel:{color:"#8e5bd8",formatter:v=>v.toFixed(3)}});
 series.push({name:"比重",type:"line",yAxisIndex:1,data:gp,symbol:"circle",symbolSize:8,lineStyle:{width:2,color:"#8e5bd8"},itemStyle:{color:"#8e5bd8"}})}
 const fmtTip=items=>{let t=items.find(i=>i.seriesName==="实际温度"),g=items.find(i=>i.seriesName==="比重"),e=items.find(i=>i.seriesName==="估计液温"),out=[];
@@ -196,7 +198,7 @@ let h=await(await fetch("/api/history?brew_id="+id+win.query)).json(),g=await(aw
 // "All records": the axis spans the first to the last stored sample; an empty custom start means the first sample.
 // "All records": the axis spans the first to the last record, including the OG at the brew start and gravity readings.
 if(win.all){let ts=h.map(p=>p.time).concat(g.map(x=>x.time));if(b&&b.og&&b.started_at)ts.push(b.started_at);ts=ts.map(x=>new Date(x).getTime());
-win=ts.length?{from:new Date(Math.min(...ts)),to:new Date(Math.max(...ts))}:null}
+win=ts.length?{from:new Date(arrMin(ts)),to:new Date(arrMax(ts))}:null}
 else if(!win.from)win=h.length?{from:new Date(h[0].time),to:win.to}:null;
 draw(h,g,b,win)}catch(e){$("#status").textContent="服务连接失败："+e.message}}
 // Chart window: all = first to last record (also used for ended brews); preset = [now - hours, now];
